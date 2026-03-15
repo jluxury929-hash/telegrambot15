@@ -48,7 +48,7 @@ LOGO = """
 <code>█████╗ ██████╗ ███████╗██╗   ██╗
 ██╔══██╗██╔══██╗██╔════╝╚██╗ ██╔╝
 ███████║██████╔╝█████╗    ╚███╔╝ 
-██╔══██║██╔═══╝ ██╔══╝    ██╔██╗ 
+██╔══██║██╔═══╝ ██╔══╝     ██╔██╗ 
 ██║  ██║██║      ███████╗██╔╝ ██╗
 ╚═╝  ╚═╝╚═╝      ╚══════╝╚═╝  ╚═╝ v229-FIXED-ABI</code>
 """
@@ -275,9 +275,8 @@ async def main_handler(update, context):
                 else:
                     await update.message.reply_text("⚠️ Could not fetch balance (wrong network?). Set HYDRA_MANAGER_ADDRESS and RPC_URL for Polygon.", parse_mode='HTML')
                     return
-            await update.message.reply_text(f"<b>VAULT AUDIT</b>\n━━━━━━━━━━━━━━\n<b>{label}:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
+            await update.message.reply_text(f"<b>VAULT AUDIT</b>\n<code>{uv.address}</code>\n━━━━━━━━━━━━━━\n<b>{label}:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
     elif 'CALIBRATE' in cmd:
-        # ADDED $5 OPTION BELOW
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>\nSelect total liquidity for dual-leg arbitrage.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     elif 'POOL' in cmd and _pool_ok:
@@ -418,7 +417,6 @@ async def handle_query(update, context):
         await context.bot.send_message(q.message.chat_id, "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>", parse_mode='HTML')
 
 async def _error_handler(update, context):
-    """Log Telegram/network errors without full traceback spam."""
     import logging
     err = context.error
     if err and "NetworkError" in type(err).__name__:
@@ -426,8 +424,7 @@ async def _error_handler(update, context):
         return
     logging.getLogger(__name__).exception("Update %s caused error: %s", update, err)
 
-# --- Continuous scan (background): run arbitrage scan on an interval so opportunities are always ready
-SCAN_INTERVAL_SEC = 45  # scan every 45 seconds; reduce (e.g. 25) for quicker updates
+SCAN_INTERVAL_SEC = 45 
 
 async def _background_scan(context):
     try:
@@ -438,7 +435,6 @@ async def _background_scan(context):
         print(f"[Scan] Error: {e}")
 
 if __name__ == "__main__":
-    # Longer timeouts for slow networks / proxies (default 5s often causes "Timed out")
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).request(request).build()
     app.job_queue.run_repeating(_background_scan, interval=SCAN_INTERVAL_SEC, first=5)
