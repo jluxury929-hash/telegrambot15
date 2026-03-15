@@ -266,16 +266,25 @@ async def main_handler(update, context):
             await update.message.reply_text("⚠️ Set <b>WALLET_SEED</b> in .env to enable vault.", parse_mode='HTML')
         else:
             try:
+                n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(uv.address).call)
                 e_bal = await asyncio.to_thread(usdc_e_contract.functions.balanceOf(uv.address).call)
-                label = "USDC.e"
-            except Exception:
-                if _pool_ok:
-                    e_bal = await asyncio.to_thread(_pool_client.get_collateral_balance, w3, uv.address)
-                    label = "Collateral (mock)"
-                else:
-                    await update.message.reply_text("⚠️ Could not fetch balance (wrong network?). Set HYDRA_MANAGER_ADDRESS and RPC_URL for Polygon.", parse_mode='HTML')
-                    return
-            await update.message.reply_text(f"<b>VAULT AUDIT</b>\n<code>{uv.address}</code>\n━━━━━━━━━━━━━━\n<b>{label}:</b> ${e_bal/1e6:.2f}", parse_mode='HTML')
+                
+                msg = (
+                    f"<b>VAULT AUDIT</b>\n<code>{uv.address}</code>\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"<b>USDC.e (Bridged):</b> ${e_bal/1e6:.2f}\n"
+                    f"<b>Native USDC:</b> ${n_bal/1e6:.2f}"
+                )
+                
+                kb = []
+                if n_bal > 1000000: # If more than $1.00 Native USDC
+                    kb.append([InlineKeyboardButton("🔄 CONVERT NATIVE TO USDC.e", callback_data="CONVERT_NATIVE")])
+                
+                await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb) if kb else None, parse_mode='HTML')
+                
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Balance Fetch Error: {str(e)[:50]}", parse_mode='HTML')
+
     elif 'CALIBRATE' in cmd:
         kb = [[InlineKeyboardButton(f"${x}", callback_data=f"SET_{x}") for x in [5, 50, 100, 250, 500, 1000]]]
         await update.message.reply_text("🎯 <b>CALIBRATE STRIKE CAPITAL:</b>\nSelect total liquidity for dual-leg arbitrage.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
@@ -326,6 +335,40 @@ async def _reply_pool_state(update, context, is_callback=False):
 async def handle_query(update, context):
     q = update.callback_query; await q.answer()
     stake = float(context.user_data.get('stake', 50))
+
+    if q.data == "CONVERT_NATIVE":
+        m = await q.edit_message_text("⏳ <b>PREPARING UNISWAP ROUTE...</b>", parse_mode='HTML')
+        uv = _user_vault(update)
+        try:
+            n_bal = await asyncio.to_thread(usdc_n_contract.functions.balanceOf(uv.address).call)
+            allowance = await asyncio.to_thread(usdc_n_contract.functions.allowance(uv.address, UNISWAP_ROUTER).call)
+            
+            if allowance < n_bal:
+                await m.edit_text("🔓 <b>APPROVING UNISWAP ROUTER...</b>", parse_mode='HTML')
+                tx = usdc_n_contract.functions.approve(UNISWAP_ROUTER, 2**256 - 1).build_transaction({
+                    'from': uv.address, 
+                    'nonce': w3.eth.get_transaction_count(uv.address), 
+                    'gasPrice': w3.eth.gas_price
+                })
+                signed = w3.eth.account.sign_transaction(tx, uv.key)
+                w3.eth.send_raw_transaction(signed.raw_transaction)
+                await m.edit_text("✅ <b>ROUTER APPROVED.</b>\nTap Convert again in 10s to execute swap.", parse_mode='HTML')
+                return
+
+            params = {
+                "tokenIn": USDC_NATIVE, "tokenOut": USDC_E, "fee": 100, 
+                "recipient": uv.address, "deadline": int(time.time()) + 600,
+                "amountIn": n_bal, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0
+            }
+            tx = swap_router.functions.exactInputSingle(params).build_transaction({
+                'from': uv.address, 'nonce': w3.eth.get_transaction_count(uv.address), 'gasPrice': w3.eth.gas_price
+            })
+            signed = w3.eth.account.sign_transaction(tx, uv.key)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            await m.edit_text(f"🚀 <b>CONVERSION SENT</b>\nHash: <code>{tx_hash.hex()[:25]}...</code>", parse_mode='HTML')
+        except Exception as e:
+            await m.edit_text(f"❌ <b>CONVERSION FAILED:</b> {str(e)[:50]}", parse_mode='HTML')
+        return
 
     if q.data == "POOL_REF" and _pool_ok:
         await _reply_pool_state(update, context, is_callback=True)
@@ -403,6 +446,14 @@ async def handle_query(update, context):
         if client is None:
             await context.bot.send_message(q.message.chat_id, "⚠️ Set <b>WALLET_SEED</b> in .env and deposit to <b>My Wallet</b> to enable trading.", parse_mode='HTML')
             return
+        
+        # --- PERMISSION GUARD ---
+        allowance = await asyncio.to_thread(usdc_e_contract.functions.allowance(uv.address, CTF_EXCHANGE).call)
+        if allowance < (stake * 1e6):
+            kb = [[InlineKeyboardButton("🔓 APPROVE POLYMARKET (USDC.e)", callback_data="APPROVE_CONTRACT")]]
+            await context.bot.send_message(q.message.chat_id, "⚠️ <b>USDC.e PERMISSION REQUIRED</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            return
+
         target = ARBI_CACHE[int(q.data.split("_")[1])]
         calc = calculate_arbitrage_guaranteed(target['p_y'], target['p_n'], stake)
         results = []
@@ -415,6 +466,18 @@ async def handle_query(update, context):
                 results.append(resp.get("success", False))
             except: results.append(False)
         await context.bot.send_message(q.message.chat_id, "✅ <b>ARBITRAGE SECURED</b>" if all(results) else "⚠️ <b>EXECUTION ERROR</b>", parse_mode='HTML')
+
+    elif q.data == "APPROVE_CONTRACT":
+        uv = _user_vault(update)
+        try:
+            tx = usdc_e_contract.functions.approve(CTF_EXCHANGE, 2**256 - 1).build_transaction({
+                'from': uv.address, 'nonce': w3.eth.get_transaction_count(uv.address), 'gasPrice': w3.eth.gas_price
+            })
+            signed = w3.eth.account.sign_transaction(tx, uv.key)
+            w3.eth.send_raw_transaction(signed.raw_transaction)
+            await q.edit_message_text("✅ <b>USDC.e APPROVED!</b> Execute again in 15s.", parse_mode='HTML')
+        except Exception as e:
+            await q.edit_message_text(f"❌ <b>FAILED:</b> {e}", parse_mode='HTML')
 
 async def _error_handler(update, context):
     import logging
